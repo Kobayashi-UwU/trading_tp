@@ -1,0 +1,117 @@
+//@version=6
+strategy(
+    "Bar Momentum Pro",
+    overlay = true,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 10,
+    pyramiding = 0
+)
+
+//==================================================
+// 🔧 INPUTS
+//==================================================
+maxIdLossPcnt = input.float(1.0, "Max Intraday Loss (%)")
+
+emaLen      = input.int(200, "Trend EMA Length")
+atrLen      = input.int(14, "ATR Length")
+atrSLMult   = input.float(1.5, "Stop Loss ATR Multiplier")
+atrTPMult   = input.float(3.0, "Take Profit ATR Multiplier")
+
+sessionTime = input.session("0700-1700", "Trading Session")
+
+//==================================================
+// 🛑 RISK CONTROL
+//==================================================
+strategy.risk.max_intraday_loss(maxIdLossPcnt, strategy.percent_of_equity)
+
+//==================================================
+// 📊 INDICATORS
+//==================================================
+ema200 = ta.ema(close, emaLen)
+atr    = ta.atr(atrLen)
+atrAvg = ta.sma(atr, 20)
+
+//==================================================
+// 🔍 FILTERS
+//==================================================
+trendLong  = close > ema200
+trendShort = close < ema200
+
+volatilityOK = atr > atrAvg
+sessionOK = not na(time(timeframe.period, sessionTime))
+
+//==================================================
+// 🕯 PRICE ACTION LOGIC (original idea, cleaner)
+//==================================================
+bullBar = close > open
+bearBar = close < open
+
+barUpCond = bullBar and open > close[1]
+barDnCond = bearBar and open < close[1]
+
+//==================================================
+// 🎯 FINAL ENTRY CONDITIONS
+//==================================================
+longCondition  = barUpCond and trendLong  and volatilityOK and sessionOK
+shortCondition = barDnCond and trendShort and volatilityOK and sessionOK
+
+//==================================================
+// 🚀 ENTRIES
+//==================================================
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+//==================================================
+// 🧯 EXITS (ATR BASED)
+//==================================================
+longSL = close - atr * atrSLMult
+longTP = close + atr * atrTPMult
+
+shortSL = close + atr * atrSLMult
+shortTP = close - atr * atrTPMult
+
+strategy.exit("Exit Long",  "Long",  stop=longSL,  limit=longTP)
+strategy.exit("Exit Short", "Short", stop=shortSL, limit=shortTP)
+
+//==================================================
+// 🔁 CLOSE ON OPPOSITE SIGNAL
+//==================================================
+if shortCondition
+    strategy.close("Long")
+
+if longCondition
+    strategy.close("Short")
+
+//==================================================
+// 📈 VISUALS
+//==================================================
+plot(ema200, "EMA 200", color=color.orange, linewidth=2)
+
+plotshape(
+    longCondition,
+    title="Long Signal",
+    style=shape.triangleup,
+    location=location.belowbar,
+    color=color.lime,
+    size=size.small,
+    text="LONG"
+)
+
+plotshape(
+    shortCondition,
+    title="Short Signal",
+    style=shape.triangledown,
+    location=location.abovebar,
+    color=color.red,
+    size=size.small,
+    text="SHORT"
+)
+
+barcolor(
+    longCondition ? color.new(color.green, 0) :
+    shortCondition ? color.new(color.red, 0) :
+    na
+)
