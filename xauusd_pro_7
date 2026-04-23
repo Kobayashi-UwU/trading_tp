@@ -1,0 +1,171 @@
+//@version=5
+// =====================================================================
+//  XAUUSD Pro v7 — Long-only + Pyramiding (scale into winners)
+//
+//  WHY: v6 gave us +22.87% but B&H gave +77% — we're under-capturing
+//       gold's strong uptrend. Pros scale into trends. We will too.
+//
+//  CHANGE FROM v6:
+//   - Allow up to 2 simultaneous long positions (pyramiding=2)
+//   - 2nd entry fires when:
+//       * a NEW longCond is true
+//       * AND we already have 1 open position
+//       * AND that position is in profit by >= 1.5 × ATR
+//   - Each entry has its OWN bracket (independent SL & TP)
+//
+//  EVERYTHING ELSE = v6:
+//   - 2% risk per entry
+//   - Hard SL @ 1.8 ATR, hard TP @ 3.5 ATR (no trailing, no time-stop)
+//   - Same entry filters (bull regime + pullback + RSI + MACD + session)
+//   - Equity guard 12%, cooldown 3 bars
+//
+//  RECOMMENDED : 30m on OANDA:XAUUSD
+// =====================================================================
+strategy("XAUUSD Pro v7 — Pyramid",
+     overlay                 = true,
+     initial_capital         = 10000,
+     currency                = currency.USD,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 100,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.02,
+     slippage                = 2,
+     pyramiding              = 2,
+     calc_on_every_tick      = false,
+     process_orders_on_close = true)
+
+// ---------------------------------------------------------------------
+//  INPUTS
+// ---------------------------------------------------------------------
+grpTrend = "Trend / Regime"
+emaFastLen = input.int(21,  "EMA Fast",  minval=5,  group=grpTrend)
+emaMidLen  = input.int(50,  "EMA Mid",   minval=10, group=grpTrend)
+emaSlowLen = input.int(200, "EMA Slow",  minval=50, group=grpTrend)
+
+grpMom = "Momentum"
+rsiLen     = input.int(14, "RSI Length",   group=grpMom)
+rsiLongMin = input.int(45, "Long RSI Min", group=grpMom)
+rsiLongMax = input.int(70, "Long RSI Max", group=grpMom)
+macdFast = input.int(12, "MACD Fast",   group=grpMom)
+macdSlow = input.int(26, "MACD Slow",   group=grpMom)
+macdSig  = input.int(9,  "MACD Signal", group=grpMom)
+
+grpADX = "Trend Strength"
+adxLen = input.int(14,   "ADX Length", group=grpADX)
+adxMin = input.float(20, "ADX Min",    step=1, group=grpADX)
+
+grpRisk = "Risk Management"
+atrLen          = input.int(14,    "ATR Length",                 group=grpRisk)
+atrStopMult     = input.float(1.8, "ATR Stop Multiplier",         step=0.1, group=grpRisk)
+atrTpMult       = input.float(3.5, "ATR Take-Profit Multiplier",  step=0.1, group=grpRisk)
+riskPerTradePct = input.float(2.0, "Risk % per entry",            step=0.1, group=grpRisk)
+
+grpPyr = "Pyramiding"
+usePyramid     = input.bool(true,  "Allow add-on entries", group=grpPyr)
+addOnAtrTrig   = input.float(1.5,  "Add-on trigger (ATR in profit)", step=0.1, group=grpPyr)
+
+grpGuard = "Drawdown Guard"
+useGuard  = input.bool(true,  "Enable equity guard", group=grpGuard)
+ddPctStop = input.float(12.0, "Pause if DD from peak > %", step=0.5, group=grpGuard)
+guardBars = input.int(20,     "Pause duration (bars)",    minval=1,  group=grpGuard)
+cooldown  = input.int(3,      "Cooldown after loss (bars)", minval=0, group=grpGuard)
+
+grpSess = "Session Filter"
+useSession = input.bool(true,           "Limit to session",  group=grpSess)
+sessStr    = input.session("0800-2000", "Session (UTC)",     group=grpSess)
+
+// ---------------------------------------------------------------------
+//  INDICATORS
+// ---------------------------------------------------------------------
+emaFast = ta.ema(close, emaFastLen)
+emaMid  = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+rsi = ta.rsi(close, rsiLen)
+[macdLine, macdSignal, hist] = ta.macd(close, macdFast, macdSlow, macdSig)
+[diPlus, diMinus, adx]       = ta.dmi(adxLen, adxLen)
+atrVal = ta.atr(atrLen)
+
+// ---------------------------------------------------------------------
+//  REGIME + FILTERS (v6 untouched)
+// ---------------------------------------------------------------------
+bullRegime = emaMid > emaSlow and close > emaSlow
+trending   = adx > adxMin
+inSession  = not useSession or not na(time(timeframe.period, sessStr))
+
+pullbackLong = low <= emaFast * 1.005 and close > emaFast
+rsiOkLong    = rsi >= rsiLongMin and rsi <= rsiLongMax
+momUp        = hist > 0 and hist > hist[1]
+
+// ---------------------------------------------------------------------
+//  EQUITY GUARD
+// ---------------------------------------------------------------------
+var float peakEquity = strategy.initial_capital
+peakEquity := math.max(peakEquity, strategy.equity)
+ddFromPeakPct = (peakEquity - strategy.equity) / peakEquity * 100
+
+var int pauseUntilBar = 0
+if useGuard and ddFromPeakPct > ddPctStop and bar_index > pauseUntilBar
+    pauseUntilBar := bar_index + guardBars
+guardOk = bar_index >= pauseUntilBar
+
+// ---------------------------------------------------------------------
+//  COOLDOWN AFTER LOSS
+// ---------------------------------------------------------------------
+var int cooldownUntil = 0
+if strategy.closedtrades > 0 and ta.change(strategy.closedtrades) != 0
+    lastPnL = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPnL < 0
+        cooldownUntil := bar_index + cooldown
+cooldownOk = bar_index >= cooldownUntil
+
+// ---------------------------------------------------------------------
+//  ENTRY CONDITION
+// ---------------------------------------------------------------------
+baseOk = trending and inSession and guardOk and cooldownOk
+longCond = bullRegime and baseOk and pullbackLong and rsiOkLong and momUp
+
+// ---------------------------------------------------------------------
+//  POSITION SIZING — 2% risk per individual entry
+// ---------------------------------------------------------------------
+stopDist   = atrVal * atrStopMult
+riskAmount = strategy.equity * riskPerTradePct / 100
+qty        = stopDist > 0 ? riskAmount / stopDist : 0
+
+// ---------------------------------------------------------------------
+//  EXECUTION — primary + optional add-on, each with own bracket
+// ---------------------------------------------------------------------
+// Track first entry's price so we know when we're "in profit by 1.5 ATR"
+var float firstEntryPrice = na
+
+primarySL = close - atrVal * atrStopMult
+primaryTP = close + atrVal * atrTpMult
+
+// Primary entry (only when flat)
+if longCond and strategy.opentrades == 0
+    strategy.entry("L1", strategy.long, qty=qty)
+    strategy.exit("L1-x", "L1", stop=primarySL, limit=primaryTP)
+    firstEntryPrice := close
+
+// Add-on entry (pyramid #2)
+addOnReady = usePyramid and strategy.opentrades == 1 and not na(firstEntryPrice) and (close - firstEntryPrice) >= addOnAtrTrig * atrVal
+if longCond and addOnReady
+    strategy.entry("L2", strategy.long, qty=qty)
+    strategy.exit("L2-x", "L2", stop=close - atrVal * atrStopMult, limit=close + atrVal * atrTpMult)
+
+// Reset trackers when fully flat
+if strategy.position_size == 0
+    firstEntryPrice := na
+
+// ---------------------------------------------------------------------
+//  VISUALS
+// ---------------------------------------------------------------------
+plot(emaFast, "EMA 21",  color=color.new(color.yellow, 0))
+plot(emaMid,  "EMA 50",  color=color.new(color.orange, 0))
+plot(emaSlow, "EMA 200", color=color.new(color.red, 0))
+
+bgcolor(bullRegime ? color.new(color.green, 92) : na, title="Bull Regime")
+bgcolor(not guardOk ? color.new(color.purple, 85) : na, title="DD Guard Pause")
+
+plotshape(longCond and strategy.opentrades == 0,  title="L1", location=location.belowbar, style=shape.triangleup, color=color.new(color.lime, 0), size=size.tiny)
+plotshape(longCond and addOnReady,                title="L2 add-on", location=location.belowbar, style=shape.diamond, color=color.new(color.aqua, 0), size=size.tiny)
